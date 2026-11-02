@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Everyworld</title>
+<meta name="description" content="Fractal planets from orbit to pebbles, in the browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oxanium:wght@500;700&family=Barlow:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+<canvas id="view" aria-label="Rendered view of the current planet"></canvas>
+<div id="flash"></div>
+<header id="bar">
+  <div class="brand"><b>EVERYWORLD</b><span id="wname">Loading</span><small id="wkind"></small></div>
+  <div class="actions">
+    <button id="bHome" title="Return to orbit (H)">Orbit</button>
+    <button id="bScout" title="Teleport to a dramatic spot (R)">Scout</button>
+    <button id="bRandom" title="Random camera anywhere on the planet">Random view</button>
+    <button id="bWalk" title="Stand on the ground and walk (G)">Walk</button>
+    <button id="bJump" class="hot" title="Generate a new world (N)">New world</button>
+  </div>
+</header>
+<aside id="panel" aria-label="Controls">
+  <nav id="tabs" role="tablist"></nav>
+  <div id="pane"></div>
+</aside>
+<section id="graph" hidden aria-label="Terrain function graph">
+  <div class="ghead"><b>Terrain graph</b><span id="gmsg"></span>
+    <select id="gadd" aria-label="Add a node"></select>
+    <button id="gdel">Delete node</button><button id="gclose">Close</button></div>
+  <div class="gbody"><div id="gcanvas"><svg id="gsvg"></svg></div><div id="gparams"></div></div>
+</section>
+<footer id="hud">
+  <div><label>Altitude</label><output id="hAlt">0</output></div>
+  <div><label>Above ground</label><output id="hAgl">0</output></div>
+  <div><label>Location</label><output id="hLoc">0</output></div>
+  <div><label>Rate</label><output id="hFps">0</output></div>
+  <div class="prog"><label id="hState">Refining</label><i id="hBar"></i></div>
+</footer>
+<div id="hint">Drag to turn or spin the globe. Scroll to change altitude. Double-click to fly there. WASD to move, Q and E for down and up.</div>
+<div id="fail" hidden></div>
+<div id="result" hidden><div class="rbox"><img id="rimg" alt="Finished render"><div class="rrow"><a id="rsave" download="everyworld.png">Save image</a><button id="rclose">Close</button></div><p>If the save link is blocked here, right-click the image and choose Save Image.</p></div></div>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
