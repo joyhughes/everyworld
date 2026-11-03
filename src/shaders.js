@@ -79,33 +79,50 @@ vec4 fractal(int pi,vec3 d,float lod){
   if(warp>0.){int ws=int(c.z);
     vec4 w0=sn(ws,0,d),w1=sn(ws+2,0,d),w2=sn(ws+4,0,d);
     w=vec3(w0.w,w1.w,w2.w)*warp*.4;J=mat3(vec3(w0.x,w1.x,w2.x),vec3(w0.y,w1.y,w2.y),vec3(w0.z,w1.z,w2.z))*warp*.4;}
+  // Octaves past the footprint are not evaluated, but the multifractal types add a positive
+  // amount per octave on average. So the partial last octave blends from its expected value to
+  // its real value, and the expected value of every omitted octave is added at the end. A coarse
+  // view then sits where the detailed surface sits on average, and coastlines hold still as the
+  // camera approaches. E|n| = .208 and E[n^2] = .0686 for one simplex octave (measured).
+  const float EA=.208,E2=.0686;
   float amp=1.;vec4 res=vec4(0.);
-  vec4 wt=vec4(0.,0.,0.,1.);vec3 ds=vec3(0.);float norm=1./LF[s].w;
+  vec4 wt=vec4(0.,0.,0.,1.);vec3 ds=vec3(0.);float damp=1.;
+  float mR=off*off-2.*off*EA+E2; // E[(off-|n|)^2], the ridged signal's mean
   for(int k=0;k<n;k++){
     vec4 N;
     float wf=warp>0.?1.-smoothstep(7.,11.,float(k)):0.;
     if(wf>0.){N=sn(s,k,d+w*wf);N.xyz+=(N.xyz*J)*wf;}else N=sn(s,k,d);
     float ow=k==n-1?last:1.;
-    N*=ow;
-    float damp=1.;
-    if(ero>0.){vec3 nd=N.xyz/LF[s+k].w;ds+=nd*amp;damp=1./(1.+ero*dot(ds,ds));}
-    if(type==0){res+=N*amp*damp;}
-    else if(type==1){res+=(N.w<0.?-N:N)*amp*damp;}
+    if(ero>0.){vec3 nd=N.xyz/LF[s+k].w*ow;ds+=nd*amp;damp=1./(1.+ero*dot(ds,ds));}
+    vec4 inc,expv;
+    if(type==0){inc=N*amp*damp;expv=vec4(0.);}
+    else if(type==1){inc=(N.w<0.?-N:N)*amp*damp;expv=vec4(0.,0.,0.,EA*amp*damp);}
     else if(type==2){ // heterogeneous terrain
       vec4 sg=N;sg.w+=off;
-      if(k==0)res=sg;else res+=dmul(sg,res)*amp*damp;
+      if(k==0){inc=sg;expv=vec4(0.,0.,0.,off);}else{inc=dmul(sg,res)*amp*damp;expv=res*off*amp*damp;}
     } else if(type==3){ // hybrid multifractal
       vec4 sg=N;sg.w+=off;
-      if(k==0){res=sg;wt=sg*gn;}else{
+      if(k==0){inc=sg;expv=vec4(0.,0.,0.,off);wt=sg*gn;}else{
         if(wt.w>1.)wt=vec4(0.,0.,0.,1.);else if(wt.w<0.)wt=vec4(0.);
-        vec4 c=dmul(wt,sg);res+=c*amp*damp;wt=c*gn;}
+        vec4 c=dmul(wt,sg);inc=c*amp*damp;expv=wt*off*amp*damp;wt=c*gn;}
     } else { // ridged multifractal
-      vec4 sg=(N.w<0.?N:-N);sg.w+=off*(ow>.999?1.:ow);
+      vec4 sg=(N.w<0.?N:-N);sg.w+=off;
       vec4 s2=dmul(sg,sg);
-      if(k==0){res=s2;wt=vec4(0.,0.,0.,1.);}else{res+=dmul(s2,wt)*amp*damp;}
+      inc=k==0?s2:dmul(s2,wt)*amp*damp;expv=k==0?vec4(0.,0.,0.,mR):wt*mR*amp*damp;
       vec4 nw=s2*gn;if(nw.w>1.)nw=vec4(0.,0.,0.,1.);else if(nw.w<0.)nw=vec4(0.);wt=nw;
     }
+    res+=mix(expv,inc,ow);
     amp*=ga;
+  }
+  // expected sum of the octaves that were not evaluated
+  int m=maxO-n;
+  if(m>0&&type!=0){
+    float geo=(1.-pow(ga,float(m)))/(1.-ga);
+    if(type==1)res.w+=EA*amp*damp*geo;
+    else if(type==2)res+=res*off*amp*damp*geo;
+    else if(type==3){if(wt.w>1.)wt=vec4(0.,0.,0.,1.);else if(wt.w<0.)wt=vec4(0.);
+      float q=ga*min(off*gn,1.),g2=(1.-pow(q,float(m)))/(1.-q);res+=wt*off*amp*damp*g2;}
+    else{float wb=min(mR*gn,1.);res+=wt*mR*amp*damp+vec4(0.,0.,0.,mR*wb*amp*ga*damp*(1.-pow(ga,float(m-1)))/(1.-ga));}
   }
   if(type==4)res.w-=.6,res*=.6;
   return res;
