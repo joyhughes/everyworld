@@ -33,16 +33,76 @@ export class Renderer {
     this.probeTex = this.texture(64, 1, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
     this.probeFb = this.fbo(this.probeTex);
     this.qTex = this.texture(64, 1, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
-    this.mapW = 1536; this.mapH = 768;
-    this.mapTex = this.texture(this.mapW, this.mapH, gl.R32F, gl.RED, gl.FLOAT, gl.getExtension('OES_texture_float_linear') ? gl.LINEAR : gl.NEAREST);
-    gl.bindTexture(gl.TEXTURE_2D, this.mapTex); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    this.mapFb = this.fbo(this.mapTex);
-    this.accum = null; this.frame = 0; this.samples = 0;
+    this.setMapSize(1536, 768);
+    this.view = this.makeAccum();
+    this.frame = 0;
     this.quality = { steps: 90, shadow: 10, cloud: 14 };
+    this.style = 1; // 0 textured, 1 textured with clouds, 2 wireframe
     this.scale = 0.6;
     this.programKey = null;
     this.hmin = -6; this.hmax = 12;
-    this.tile = 0;
+    // GPU pacing: a timer query measures real GPU time; a fence keeps at most one frame in flight,
+    // so the browser never queues work faster than the GPU drains it.
+    this.tq = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    this.queries = []; this.active = null; this.fence = null; this.fenceAt = 0;
+    this.cost = { move: 0, refine: 0, fence: 0 };
+    this.pbo = gl.createBuffer(); this.probeJob = null;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    this.gpuName = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  }
+  setMapSize(w, h) {
+    const gl = this.gl;
+    if (this.mapW === w && this.mapH === h) return;
+    if (this.mapTex) { gl.deleteTexture(this.mapTex); gl.deleteFramebuffer(this.mapFb); }
+    this.mapW = w; this.mapH = h;
+    this.mapTex = this.texture(w, h, gl.R32F, gl.RED, gl.FLOAT, gl.getExtension('OES_texture_float_linear') ? gl.LINEAR : gl.NEAREST);
+    gl.bindTexture(gl.TEXTURE_2D, this.mapTex); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    this.mapFb = this.fbo(this.mapTex); this.map = null;
+  }
+  // The live view's accumulation state; offscreen renders (thumbnails, globe, stills) make their own.
+  makeAccum() { return { tex: null, fb: null, w: 0, h: 0, samples: 0, tile: 0 }; }
+  get samples() { return this.view.samples; }
+  get tile() { return this.view.tile; }
+  set tile(v) { this.view.tile = v; }
+  get accum() { return this.view.tex; }
+  freeAccum(a) { if (a.tex) { this.gl.deleteTexture(a.tex); this.gl.deleteFramebuffer(a.fb); a.tex = null; a.w = 0; } }
+
+  // ---- pacing -----------------------------------------------------------
+  busy() {
+    const gl = this.gl;
+    if (!this.fence) return false;
+    if (gl.getSyncParameter(this.fence, gl.SYNC_STATUS) !== gl.SIGNALED) return true;
+    gl.deleteSync(this.fence); this.fence = null;
+    this.cost.fence = performance.now() - this.fenceAt;
+    return false;
+  }
+  begin(kind, k = 1, meta = null) {
+    const gl = this.gl;
+    if (this.tq && !this.active) { const q = gl.createQuery(); gl.beginQuery(this.tq.TIME_ELAPSED_EXT, q); this.active = { q, kind, k, meta }; }
+  }
+  end() {
+    const gl = this.gl;
+    if (this.active) { gl.endQuery(this.tq.TIME_ELAPSED_EXT); this.queries.push(this.active); this.active = null; }
+    if (!this.fence) { this.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); this.fenceAt = performance.now(); }
+    gl.flush();
+  }
+  // Collects finished timer results and finished asynchronous probes. Never blocks.
+  poll() {
+    const gl = this.gl;
+    while (this.queries.length) {
+      const a = this.queries[0];
+      if (!gl.getQueryParameter(a.q, gl.QUERY_RESULT_AVAILABLE)) break;
+      const bad = gl.getParameter(this.tq.GPU_DISJOINT_EXT), ms = gl.getQueryParameter(a.q, gl.QUERY_RESULT) / 1e6;
+      gl.deleteQuery(a.q); this.queries.shift();
+      if (!bad) { if (a.meta) this.onTimed?.(a.meta, ms); else { const old = this.cost[a.kind], v = ms * a.k; this.cost[a.kind] = old ? old * .6 + v * .4 : v; } this.timed = true; }
+    }
+    const j = this.probeJob;
+    if (j && gl.getSyncParameter(j.fence, gl.SYNC_STATUS) === gl.SIGNALED) {
+      gl.deleteSync(j.fence); this.probeJob = null;
+      const out = new Float32Array(j.count * 4);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo); gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      j.done(out);
+    }
   }
 
   texture(w, h, ifmt, fmt, type, filter) {
@@ -226,7 +286,7 @@ export class Renderer {
     gl.uniform1f(u.uTan, tan); gl.uniform1f(u.uAspect, res[0] / res[1]);
     gl.uniform1f(u.uPix, 2 * tan / res[1]); gl.uniform2f(u.uRes, res[0], res[1]);
     gl.uniform1f(u.uTime, time); gl.uniform1i(u.uFrame, this.frame);
-    gl.uniform1i(u.uFine, this.quality.fine ?? 10);
+    gl.uniform1i(u.uFine, this.quality.fine ?? 10); gl.uniform1i(u.uStyle, this.style);
     const m = this.map;
     if (m) {
       const e = sub(cam.up, m.c);
@@ -264,17 +324,18 @@ export class Renderer {
   }
 
   resize(cssW, cssH, dpr) {
-    this.canvas.width = Math.round(cssW * dpr); this.canvas.height = Math.round(cssH * dpr);
+    const w = Math.max(2, Math.round(cssW * dpr)), h = Math.max(2, Math.round(cssH * dpr));
+    if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     this.resetAccum();
   }
-  ensureAccum(w, h) {
+  ensureAccum(a, w, h) {
     const gl = this.gl;
-    if (this.accum && this.accW === w && this.accH === h) return;
-    if (this.accum) { gl.deleteTexture(this.accum); gl.deleteFramebuffer(this.accFb); }
-    this.accum = this.texture(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
-    this.accFb = this.fbo(this.accum); this.accW = w; this.accH = h; this.samples = 0; this.tile = 0;
+    if (a.tex && a.w === w && a.h === h) return;
+    this.freeAccum(a);
+    a.tex = this.texture(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    a.fb = this.fbo(a.tex); a.w = w; a.h = h; a.samples = 0; a.tile = 0;
   }
-  resetAccum() { this.samples = 0; this.tile = 0; }
+  resetAccum(a = this.view) { a.samples = 0; a.tile = 0; a.row = 0; }
 
   // The map stays valid until the camera has moved a good fraction of its own height.
   mapStale(cam) {
@@ -284,6 +345,7 @@ export class Renderer {
 
   // Bakes terrain height into the log-polar map, centred at the camera's nadir.
   bakeMap(cam, time) {
+    this.mapArgs = [Object.assign(Object.create(Object.getPrototypeOf(cam)), cam, { pos: cam.pos.slice(), up: cam.up.slice(), fwd: cam.fwd.slice(), camUp: cam.camUp.slice(), right: cam.right.slice() }), time];
     const gl = this.gl, c = cam.up.slice();
     const a = Math.abs(c[1]) < .9 ? [0, 1, 0] : [1, 0, 0];
     const t1 = norm(cross(a, c)), t2 = cross(c, t1);
@@ -298,44 +360,93 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  // Draws one sample into the accumulation buffer, a band at a time so slow GPUs stay responsive.
-  renderSample(cam, time, W, H, bands) {
+  // Draws one sample into an accumulation buffer, one strip at a time so a slow GPU never
+  // gets a long uninterruptible job. Strips are rows, or columns left to right (like the
+  // original renderer's status bar describes). `crop` limits the work to a rectangle.
+  renderSample(cam, time, W, H, bands, { acc = this.view, columns = false, crop = null } = {}) {
     const gl = this.gl;
-    this.ensureAccum(W, H);
-    if (this.tile === 0 && (!this.map || this.mapStale(cam))) this.bakeMap(cam, time);
+    this.ensureAccum(acc, W, H);
+    if (acc.tile === 0 && (!this.map || this.mapStale(cam))) this.bakeMap(cam, time);
     this.updateLattice(cam, time);
     this.setUniforms(this.main, cam, time, [W, H]);
-    const u = this.main.u, n = this.samples;
+    const u = this.main.u, n = acc.samples;
     const j = this.jitter(n);
     gl.uniform2f(u.uJit, j[0], j[1]);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.accFb);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, acc.fb);
     gl.viewport(0, 0, W, H);
     if (n === 0) { gl.disable(gl.BLEND); } else {
       gl.enable(gl.BLEND); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
       gl.blendColor(0, 0, 0, 1 / (n + 1));
     }
     gl.enable(gl.SCISSOR_TEST);
-    const y0 = Math.floor(this.tile * H / bands), y1 = Math.floor((this.tile + 1) * H / bands);
-    gl.scissor(0, y0, W, y1 - y0);
+    const [cx, cy, cw, ch] = crop ?? [0, 0, W, H];
+    if (columns) { const x0 = cx + Math.floor(acc.tile * cw / bands), x1 = cx + Math.floor((acc.tile + 1) * cw / bands); gl.scissor(x0, cy, x1 - x0, ch); }
+    else { const y0 = cy + Math.floor(acc.tile * ch / bands), y1 = cy + Math.floor((acc.tile + 1) * ch / bands); gl.scissor(cx, y0, cw, y1 - y0); }
     gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
     gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.tile++;
-    if (this.tile >= bands) { this.tile = 0; this.samples++; this.frame++; return true; }
+    acc.tile++;
+    if (acc.tile >= bands) { acc.tile = 0; acc.samples++; this.frame++; return true; }
+    return false;
+  }
+  // Renders rows [y0, y1) of the current sample; the sample completes when y1 reaches H.
+  renderRows(cam, time, W, H, y0, y1, acc = this.view) {
+    const gl = this.gl;
+    this.ensureAccum(acc, W, H);
+    if (y0 === 0 && (!this.map || this.mapStale(cam))) this.bakeMap(cam, time);
+    this.updateLattice(cam, time);
+    this.setUniforms(this.main, cam, time, [W, H]);
+    const n = acc.samples, j = this.jitter(n);
+    gl.uniform2f(this.main.u.uJit, j[0], j[1]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, acc.fb);
+    gl.viewport(0, 0, W, H);
+    if (n === 0) gl.disable(gl.BLEND); else { gl.enable(gl.BLEND); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA); gl.blendColor(0, 0, 0, 1 / (n + 1)); }
+    gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, W, y1 - y0);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    acc.row = y1 >= H ? 0 : y1; acc.tile = acc.row ? 1 : 0;
+    if (y1 >= H) { acc.samples++; this.frame++; return true; }
     return false;
   }
   jitter(n) { // R2 low-discrepancy sequence for pixel antialiasing
     if (n === 0) return [.5, .5];
     return [(.7548776662 * n) % 1, (.5698402910 * n) % 1];
   }
-  present(exposure, target = null, w = this.canvas.width, h = this.canvas.height) {
+  present(exposure, target = null, w = this.canvas.width, h = this.canvas.height, acc = this.view) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target);
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.blit);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.accum);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, acc.tex);
     gl.uniform1i(this.blit.u.uTex, 0); gl.uniform1f(this.blit.u.uExp, exposure);
     gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+  }
+  // Reads an accumulation buffer back as an 8-bit canvas (top row first).
+  toCanvas(acc, exposure) {
+    const gl = this.gl, W = acc.w, H = acc.h;
+    const tex = this.texture(W, H, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST), fb = this.fbo(tex);
+    this.present(exposure, fb, W, H, acc);
+    const px = new Uint8Array(W * H * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteTexture(tex); gl.deleteFramebuffer(fb);
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d'), img = ctx.createImageData(W, H);
+    for (let y = 0; y < H; y++) img.data.set(px.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+  // A small one-off picture from any camera (thumbnails, the GPS globe, the wizard's Zip Render).
+  // Uses its own buffers and restores the live view's map afterwards.
+  snapshot(cam, time, W, H, spp = 1, quality = { steps: 90, shadow: 6, cloud: 8, fine: 4 }) {
+    const acc = this.makeAccum(), q = this.quality, had = this.map, args = this.mapArgs;
+    this.quality = quality; this.map = null;
+    for (let s = 0; s < spp; s++) this.renderSample(cam, time, W, H, 1, { acc });
+    const c = this.toCanvas(acc, this.world.exposure);
+    this.freeAccum(acc); this.quality = q;
+    // put the live view's height map back, so its refinement carries on undisturbed
+    if (had && args) this.bakeMap(...args); else this.map = null;
+    return c;
   }
 
   // Probes run the real terrain shader so collision, picking and scouting match the picture.
@@ -365,6 +476,30 @@ export class Renderer {
     return dirs.map((_, i) => ({ h: o[i * 4], slope: o[i * 4 + 1] }));
   }
   groundAt(cam, time) { return this.heightsAt(cam, time, [cam.up], Math.max(cam.altAboveGround * .02, 2e-4))[0]; }
+  // Same as groundAt, but the result arrives a frame or two later through a pixel buffer, so
+  // walking and flying never stall the CPU waiting for the GPU.
+  groundAsync(cam, time, done) {
+    if (this.probeJob) return false;
+    const gl = this.gl, R = this.world.radius, foot = Math.max(cam.altAboveGround * .02, 2e-4);
+    const q = new Float32Array(64 * 4); q.set([0, 0, 0, -Math.log2(foot / R)], 0);
+    gl.bindTexture(gl.TEXTURE_2D, this.qTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 64, 1, gl.RGBA, gl.FLOAT, q);
+    this.updateLattice(cam, time);
+    this.setUniforms(this.probe, cam, time, [this.canvas.width, this.canvas.height]);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.qTex);
+    gl.uniform1i(this.probe.u.uQ, 3); gl.uniform1i(this.probe.u.uMode, 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.probeFb);
+    gl.viewport(0, 0, 64, 1); gl.disable(gl.BLEND);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, 16, gl.STREAM_READ);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.probeJob = { fence: gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0), count: 1, done: o => done({ h: o[0], slope: o[1] }) };
+    gl.flush();
+    return true;
+  }
 
   pick(cam, time, dir) {
     const q = new Float32Array(64 * 4), pix = 2 * Math.tan(cam.fov / 2) / this.canvas.height;

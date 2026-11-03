@@ -15,7 +15,7 @@ layout(std140) uniform Lat{vec4 LF[${SLOTS}];ivec4 LI[${SLOTS}];};
 uniform vec4 uP[96];
 uniform vec3 uU,uRight,uUp,uFwd,uSun,uSunCol;
 uniform float uA,uR,uHMin,uHMax,uSea,uTan,uAspect,uPix,uTime;
-uniform vec2 uRes,uJit;uniform int uFrame,uSteps,uShadow,uCloudSteps,uSeaType,uFine;
+uniform vec2 uRes,uJit;uniform int uFrame,uSteps,uShadow,uCloudSteps,uSeaType,uFine,uStyle;
 uniform sampler2D uTrans,uPal,uRing;
 uniform vec3 uBetaR,uBetaM;uniform float uHr,uHm,uAtmTop,uMieG,uAtmOn;
 uniform float uCover,uCloudLo,uCloudHi,uCloudDen;uniform vec3 uCloudCol;uniform mat3 uCloudRot;
@@ -251,7 +251,7 @@ float cloudDensity(vec3 dc,float hf,float lod){
 // front-to-back march through the cloud shell. rgb colour, a transmittance.
 vec4 clouds(vec3 d,float tMax,float jit,out float tFirst){
   tFirst=-1.;
-  if(uCover<=.001)return vec4(0.,0.,0.,1.);
+  if(uCover<=.001||uStyle==0)return vec4(0.,0.,0.,1.);
   float mu=dot(d,uU);float hLo=uCloudLo+max(uSea,0.),hHi=uCloudHi+max(uSea,0.);
   vec2 top=shell(hHi,mu),bot=shell(hLo,mu);if(top.y<0.)return vec4(0.,0.,0.,1.);
   float t0,t1;
@@ -285,7 +285,7 @@ vec4 clouds(vec3 d,float tMax,float jit,out float tFirst){
   return vec4(C,T);
 }
 float cloudShadow(vec3 p){
-  if(uCover<=.001)return 1.;
+  if(uCover<=.001||uStyle==0)return 1.;
   float mu=dot(uSun,normalize(p+uU*(uR+uA)));if(mu<=0.)return 1.;
   vec3 q=p+uSun*((uCloudLo+uCloudHi)*.5/max(mu,.15));Surf s=surf(q);
   float dn=cloudDensity(uCloudRot*s.d,.5,9.);
@@ -387,7 +387,30 @@ vec3 skyDir(vec3 d,float h){ // quick sky colour for reflections
   float s=max(d.y*0.+dot(d,uU),0.);vec3 z=skyAmbient(h,uU);
   return z*(1.4-.8*s)+vec3(.0015);
 }
+// Wireframe preview: the map-marched surface, lit flat, with a latitude/longitude grid and
+// height contours whose spacing follows the camera's altitude. Very cheap.
+vec3 wire(vec3 d,float jit,out float depth){
+  Hit H=march(d,uSteps,uPix,jit);depth=H.t;
+  float sky=clamp(dot(d,uU)*.5+.5,0.,1.);
+  if(H.kind==0)return mix(vec3(.06,.06,.09),vec3(.16,.16,.22),sky)*4.;
+  vec3 p=d*H.t;Surf s=surf(p);vec3 up=(p+uU*(uR+uA))/s.r;
+  float foot=max(H.t*uPix,1e-7);float lod=-log2(foot/uR);
+  vec3 n=up;float h=uSea;
+  if(H.kind==1){vec4 t=terrain(s.d,min(lod,18.));vec3 gt=(t.xyz-up*dot(t.xyz,up))/uR;n=normalize(up-gt);h=t.w;}
+  float dif=max(dot(n,uSun),0.)*.75+.25;
+  vec3 base=H.kind==1?vec3(.54,.54,.66):vec3(.3,.34,.46);
+  // grid in degrees, coarsened by powers of ten with distance
+  float scaleKm=max(H.t,uA)*.25;float deg=scaleKm/uR*57.2958;float step_=pow(10.,ceil(log(max(deg,1e-7))/log(10.)));
+  float la=asin(clamp(up.y,-1.,1.))*57.2958,lo=atan(up.z,up.x)*57.2958;
+  vec2 g=vec2(la,lo)/step_;vec2 fw=fwidth(g)+1e-6;vec2 gq=abs(fract(g-.5)-.5)/fw;
+  float line=1.-clamp(min(gq.x,gq.y),0.,1.);
+  float cs=pow(10.,ceil(log(max(scaleKm*.15,1e-6))/log(10.)));float ch=h/cs;float cl=abs(fract(ch-.5)-.5)/(fwidth(ch)+1e-6);
+  float cont=(1.-clamp(cl,0.,1.))*float(H.kind==1);
+  vec3 col=base*dif*2.2;col=mix(col,vec3(3.2),line*.8);col=mix(col,vec3(1.1,.75,.35)*2.,cont*.55);
+  return col;
+}
 vec3 render(vec3 d,float jit,out float depth){
+  if(uStyle==2)return wire(d,jit,depth);
   float tm,tr;vec3 col=vec3(0.);
   Hit H=march(d,uSteps,uPix,jit);depth=H.t;
   float tMax=H.kind>0?H.t:1e12;

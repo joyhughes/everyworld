@@ -8,7 +8,7 @@ export async function open(url, { w = 1280, h = 720, gpu = true } = {}) {
     '--headless=new', '--remote-debugging-port=9555', gpu ? '--use-angle=metal' : '--use-angle=swiftshader', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader',
     '--disable-gpu-watchdog', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--mute-audio',
     '--user-data-dir=' + mkdtempSync(join(tmpdir(), 'ew-')), `--window-size=${w},${h}`, 'about:blank'], { stdio: 'ignore' });
-  await new Promise(r => setTimeout(r, 1800));
+  await new Promise(r => setTimeout(r, 3500));
   const tabs = await (await fetch('http://127.0.0.1:9555/json')).json();
   const ws = new WebSocket(tabs.find(t => t.type === 'page').webSocketDebuggerUrl);
   await new Promise(r => ws.onopen = r);

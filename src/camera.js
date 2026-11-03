@@ -66,6 +66,26 @@ export class Camera {
     if (l < r) this.pos = this.pos.map(c => c * r / l);
     this.derive();
   }
+  // Rotate about the view axis (tilt / roll).
+  roll(a) { this.camUp = rotate(this.camUp, this.fwd, a); this.derive(); }
+  yaw(a) { this.fwd = rotate(this.fwd, this.camUp, -a); this.derive(); }
+  pitch(a) { this.fwd = rotate(this.fwd, this.right, a); this.camUp = rotate(this.camUp, this.right, a); this.derive(); }
+  // Instrument readings relative to the local horizon, in radians.
+  get pitchAngle() { return Math.asin(Math.max(-1, Math.min(1, dot(this.fwd, this.up)))); }
+  get rollAngle() { return Math.atan2(-dot(this.right, this.up), dot(this.camUp, this.up)); }
+  get heading() {
+    const north = norm(add([0, 1, 0], this.up, -this.up[1])), east = cross(north, this.up);
+    const f = norm(add(this.fwd, this.up, -dot(this.fwd, this.up)));
+    return Math.atan2(dot(f, east), dot(f, north));
+  }
+  // Moves to a new position, carrying the orientation along the sphere (parallel transport),
+  // so level flight follows the planet's curve.
+  transport(newPos) {
+    const u0 = this.up; this.pos = newPos; this.derive();
+    const ax = cross(u0, this.up), s = Math.hypot(...ax);
+    if (s > 1e-15) { const a = Math.atan2(s, dot(u0, this.up)), n = ax.map(c => c / s); this.fwd = rotate(this.fwd, n, a); this.camUp = rotate(this.camUp, n, a); }
+    this.derive();
+  }
   frame(dt) {
     if (this.flight) {
       const f = this.flight; f.t = Math.min(f.t + dt / f.dur, 1);
@@ -80,7 +100,7 @@ export class Camera {
       this.derive();
       if (f.t >= 1) this.flight = null;
     }
-    this.level(Math.min(dt * 3, 1) * (1 - this.orbital));
+    if (this.autoLevel !== false) this.level(Math.min(dt * 3, 1) * (1 - this.orbital));
     this.derive();
   }
   flyTo(point, targetAlt, groundH, toFwd, dur = 3) {
